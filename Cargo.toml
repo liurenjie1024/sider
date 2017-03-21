@@ -1,0 +1,6 @@
+[package]
+name = "sider"
+version = "0.1.0"
+authors = ["liurenjie1024 <liurenjie2008@gmail.com>"]
+
+[dependencies]
