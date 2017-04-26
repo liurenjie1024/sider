@@ -25,15 +25,15 @@ thread_local! {
 
 #[derive(Debug)]
 pub struct Config {
-  thread_num: usize,
-  pointer_num: usize,            // Maximum number of pointers acquired per thread.
-  scan_threshold: usize,         // The threshold to trigger scan.
-  id: Id                        // Hazard pointer manager id.
+  pub thread_num: usize,
+  pub pointer_num: usize,            // Maximum number of pointers acquired per thread.
+  pub scan_threshold: usize,         // The threshold to trigger scan.
+  pub id: Id                        // Hazard pointer manager id.
 }
 
 /// This is just a simple implementation of hazard pointer manager and only for demo usage.
 /// Any serious hazard pointer managers should be combined with thread manager.
-struct SimpleHazardPointerManager<T> {
+pub struct SimpleHazardPointerManager<T> {
   //TODO: Replace pointers with another more efficient type to avoid false sharing
   acquired_pointers: Box<[AcquiredPointers<T>]>,
   config: Config,
