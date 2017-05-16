@@ -46,7 +46,7 @@ struct Node<K, V> {
     next: AtomicPtr<Node<K, V>>,
     split_order_key: HashUnit, // split order hash code
     key: K,
-    value: V
+    value: V,
 }
 
 impl<K, V> Node<K, V> {
@@ -55,17 +55,17 @@ impl<K, V> Node<K, V> {
               V: Default
     {
         Box::new(Node {
-                    next: AtomicPtr::default(),
-                    split_order_key: reverse_bits(bucket_pos as u64),
-                    key: K::default(),
-                    value: V::default(),
-                })
+                     next: AtomicPtr::default(),
+                     split_order_key: reverse_bits(bucket_pos as u64),
+                     key: K::default(),
+                     value: V::default(),
+                 })
     }
 }
 
 
 struct Bucket<K, V> {
-    head: AtomicPtr<Node<K, V>>
+    head: AtomicPtr<Node<K, V>>,
 }
 
 impl<K, V> Bucket<K, V> {
@@ -81,7 +81,7 @@ type Buckets<K, V> = Box<[Bucket<K, V>]>;
 pub struct ConcurrentHashMap<K, V, M = SimpleHazardPointerManager> {
     memory_manager: M,
     hasher_builder: RandomState,
-    buckets: AtomicPtr<Buckets<K, V>>
+    buckets: AtomicPtr<Buckets<K, V>>,
 }
 
 
@@ -92,11 +92,10 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
 {
     pub fn new(m: M, capacity: usize) -> ConcurrentHashMap<K, V, M> {
         let table_size = table_size_for(capacity);
-        let buckets: Box<Buckets<K, V>> = Box::new(
-            (0..table_size)
-            .map(|_| Bucket::new())
-            .collect::<Vec<Bucket<K, V>>>()
-            .into_boxed_slice());
+        let buckets: Box<Buckets<K, V>> = Box::new((0..table_size)
+                                                       .map(|_| Bucket::new())
+                                                       .collect::<Vec<Bucket<K, V>>>()
+                                                       .into_boxed_slice());
         let head = Box::into_raw(Node::make_sentinel_node(0usize));
         buckets[0].head.store(head, Ordering::Relaxed);
 
@@ -226,7 +225,7 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
 
     fn insert_sentinel_node(&self, hash_code: HashUnit) {
         let bucket = self.bucket_of(hash_code);
-        let bucket_pos = (hash_code as usize) & self.get_bucket_size();
+        let bucket_pos = self.get_bucket_pos(hash_code);
         if bucket.head.load(Ordering::Relaxed).is_null() {
             let parent = self.get_parent(bucket_pos);
             self.insert_sentinel_node(parent as u64);
@@ -245,7 +244,7 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
     fn bucket_of(&self, hash_code: HashUnit) -> &Bucket<K, V> {
         unsafe {
             let buckets = &*(self.buckets.load(Ordering::Relaxed));
-            &buckets[buckets.len() & (hash_code as usize)]
+            &buckets[(buckets.len() - 1) & (hash_code as usize)]
         }
     }
 
@@ -253,26 +252,30 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
         unsafe { (*self.buckets.load(Ordering::Relaxed)).len() }
     }
 
+    fn get_bucket_pos(&self, hash_code: HashUnit) -> usize {
+        (self.get_bucket_size()-1) & (hash_code as usize)
+    }
+
     // Find the nearest bucket sentinel node that's before this bucket.
     // This is an optimization to GET_PARENT algorithm which simply unset the msb.
     // Let's assume that the length of bucket is 32, there are two cases:
-    // * bucket_pos=10110, e.g. the ith bit is set, get_parent simply unset ith bit and returns 00110
+    // * bucket_pos=10110, e.g. the ith bit is set, get_parent simply unset ith bit and returns
+    // 00110
     // * bucket_pos=00110, e.g. the ith bit is unset, get_parent should return 11010
     fn get_parent(&self, bucket_pos: usize) -> usize {
         let only_msb = reserve_only_msb(bucket_pos as u64) as usize;
         let right_mask = only_msb - 1;
         let left_mask = !right_mask;
 
-        (right_mask & bucket_pos) | (right_mask & (self.get_capacity() - bucket_pos) & !only_msb)
-    }
-
-    // Length of buckets.
-    fn get_capacity(&self) -> usize {
-        unsafe { (*(self.buckets.load(Ordering::Relaxed))).len() }
+        (right_mask & bucket_pos) | (right_mask & (self.get_bucket_size() - bucket_pos) & !only_msb)
     }
 
     // This method is only used in the single writer thread.
-    fn find(&self, key: &K, hash_code: HashUnit, split_order_key: HashUnit) -> (&AtomicPtr<Node<K, V>>, bool) {
+    fn find(&self,
+            key: &K,
+            hash_code: HashUnit,
+            split_order_key: HashUnit)
+            -> (&AtomicPtr<Node<K, V>>, bool) {
         unsafe {
             let head = &self.bucket_of(hash_code).head;
             self.find_from_node(key, split_order_key, head)
@@ -313,7 +316,6 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
         key.hash::<DefaultHasher>(&mut hasher);
         hasher.finish()
     }
-
 }
 
 
@@ -349,10 +351,10 @@ fn reserve_only_msb(hash_code: u64) -> u64 {
 }
 
 fn table_size_for(capacity: usize) -> usize {
-    const MAX_CAPACITY: usize = usize::max_value() - (usize::max_value()>>1);
+    const MAX_CAPACITY: usize = usize::max_value() - (usize::max_value() >> 1);
 
     if capacity < MAX_CAPACITY {
-        let mut ret = capacity-1;
+        let mut ret = capacity - 1;
         ret |= ret >> 1;
         ret |= ret >> 2;
         ret |= ret >> 4;
@@ -360,7 +362,7 @@ fn table_size_for(capacity: usize) -> usize {
         ret |= ret >> 16;
         ret |= ret >> 32;
 
-        ret+1
+        ret + 1
     } else {
         MAX_CAPACITY
     }
@@ -378,6 +380,8 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
     use std::vec::Vec;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
 
 
     use super::ConcurrentHashMap;
@@ -453,10 +457,7 @@ mod tests {
         let key2 = make_key(raw_key);
 
 
-        let result = map.remove(&key1, |opt_value| match opt_value {
-            Some(_) => true,
-            None => false,
-        });
+        let result = map.delete(&key1);
         assert_eq!(false, result);
 
         map.put(key1, 1);
@@ -466,10 +467,7 @@ mod tests {
         });
         assert_eq!(1, result);
 
-        let result = map.remove(&key2, |opt_value| match opt_value {
-            Some(_) => true,
-            None => false,
-        });
+        let result = map.delete(&key2);
         assert_eq!(false, result);
     }
 
@@ -492,13 +490,13 @@ mod tests {
             let key2 = make_key(raw_key);
 
             thread::spawn(move || {
-                ThreadContext::set_current(ThreadContext::new(1));
-                map.put(key1, 1);
-                barrier1.wait();
-                barrier2.wait();
-                map.delete(&key2);
-                barrier3.wait();
-            });
+                              ThreadContext::set_current(ThreadContext::new(1));
+                              map.put(key1, 1);
+                              barrier1.wait();
+                              barrier2.wait();
+                              map.delete(&key2);
+                              barrier3.wait();
+                          });
         };
 
         let thread2 = {
@@ -509,22 +507,22 @@ mod tests {
             let key1 = make_key(raw_key);
 
             thread::spawn(move || {
-                ThreadContext::set_current(ThreadContext::new(1));
-                barrier1.wait();
-                let result = map.get(&key1, |r| match r {
+                              ThreadContext::set_current(ThreadContext::new(1));
+                              barrier1.wait();
+                              let result = map.get(&key1, |r| match r {
                     Some(x) => *x,
                     None => 0,
                 });
-                assert_eq!(1, result);
-                barrier2.wait();
-                barrier3.wait();
+                              assert_eq!(1, result);
+                              barrier2.wait();
+                              barrier3.wait();
 
-                let result = map.get(&key1, |r| match r {
+                              let result = map.get(&key1, |r| match r {
                     Some(&x) => x,
                     None => 0,
                 });
-                assert_eq!(0, result);
-            })
+                              assert_eq!(0, result);
+                          })
         };
 
         assert!(thread2.join().is_ok());
@@ -566,12 +564,14 @@ mod tests {
     }
 
     fn make_map() -> Map {
+        static CONFIG_ID: AtomicU32 = AtomicU32::new(1);
+
         Map::new(SimpleHazardPointerManager::new(Config {
-                                                     thread_num: 100,
-                                                     pointer_num: 2,
-                                                     scan_threshold: 5,
-                                                     id: 1
-                                                 }), 1024)
+            thread_num: 100,
+            pointer_num: 2,
+            scan_threshold: 5,
+            id: CONFIG_ID.fetch_add(1, Ordering::SeqCst),
+        }), 1024)
     }
 
     fn make_key(raw_key: &str) -> Str {
