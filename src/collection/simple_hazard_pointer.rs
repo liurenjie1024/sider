@@ -1,7 +1,6 @@
 use std::vec::Vec;
-use std::collections::LinkedList;
 use std::collections::HashSet;
-use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::ptr;
 use std::boxed::Box;
@@ -12,11 +11,13 @@ use std::mem::transmute;
 
 use ::thread::thread_context::ThreadContext;
 use super::hazard_pointer_manager::HazardPointerManager;
+use super::hazard_pointer_manager::RetiredPointer;
+use super::hazard_pointer_manager::is_null;
 
 
 
-type AcquiredPointers<T> = Box<[AtomicPtr<T>]>;
-type RetiredPointers = LinkedList<usize>;
+type AcquiredPointers = Box<[AtomicUsize]>;
+type RetiredPointers = Vec<RetiredPointer>;
 type Id = u32;
 
 thread_local! {
@@ -33,85 +34,70 @@ pub struct Config {
 
 /// This is just a simple implementation of hazard pointer manager and only for demo usage.
 /// Any serious hazard pointer managers should be combined with thread manager.
-pub struct SimpleHazardPointerManager<T> {
+pub struct SimpleHazardPointerManager {
   //TODO: Replace pointers with another more efficient type to avoid false sharing
-  acquired_pointers: Box<[AcquiredPointers<T>]>,
-  config: Config,
-  deallocator: Box<Fn(*mut T)>
+  acquired_pointers: Box<[AcquiredPointers]>,
+  config: Config
 }
 
-impl<T> SimpleHazardPointerManager<T> {
-  pub fn new(config: Config, deallocator: Option<Box<Fn(*mut T)>>) -> SimpleHazardPointerManager<T> {
+impl SimpleHazardPointerManager {
+  pub fn new(config: Config) -> SimpleHazardPointerManager {
     let acquired_pointers  = (0...config.thread_num).map(|_| {
       (0..config.pointer_num)
-        .map(|_| AtomicPtr::default())
-        .collect::<Vec<AtomicPtr<T>>>()
+        .map(|_| AtomicUsize::default())
+        .collect::<Vec<AtomicUsize>>()
         .into_boxed_slice()
     })
-    .collect::<Vec<AcquiredPointers<T>>>()
+    .collect::<Vec<AcquiredPointers>>()
     .into_boxed_slice();
 
     SimpleHazardPointerManager { 
       acquired_pointers: acquired_pointers,
-      config: config,
-      deallocator: deallocator.unwrap_or(Box::new(|p| unsafe{Box::from_raw(p);}))
+      config: config
     }
   }
 
   fn with_retired_pointers<F, V>(&self, f: F) -> V
-    where F: Fn(&mut RetiredPointers) -> V {
+    where F: FnOnce(&mut RetiredPointers) -> V {
     RETIRED_POINTERS.with(|cell| {
       let mut map = cell.borrow_mut();
       if !map.contains_key(&self.config.id) {
-        map.insert(self.config.id, LinkedList::new());
+        map.insert(self.config.id, Vec::new());
       }
 
       f(map.get_mut(&self.config.id).unwrap())
     })
   }
 
-  fn scan(&self, retired_pointer_list: &mut RetiredPointers) {
+  fn scan(&self, retired_pointer: &mut RetiredPointers) {
     let thread_id = ThreadContext::current().thread_id;
     let acquired_pointers = self.acquired_pointers
       .iter()
       .flat_map(|v| {
         v.iter()
           .map(|p| p.load(Ordering::Acquire))
-          .filter(|&p| p != ptr::null_mut())
-      }).collect::<HashSet<*mut T>>();
-
-    let (reserved_pointers, free_pointers): (LinkedList<*mut T>, LinkedList<*mut T>) = unsafe {
-      retired_pointer_list
-        .iter()
-        .map(|&p| transmute::<usize, *mut T>(p))
-        .partition(|p| acquired_pointers.contains(p))
-    };
+          .filter(|&p| !is_null(p))
+      }).collect::<HashSet<usize>>();
     
-    retired_pointer_list.clear();
-    retired_pointer_list.extend(reserved_pointers
-      .into_iter()
-      .map(|p| p as usize));
 
-    for p in free_pointers {
-      (self.deallocator)(p);
-    }
+    retired_pointer.retain(|p| acquired_pointers.contains(&p.ptr));
   }
 }
 
-impl<T> HazardPointerManager<T> for SimpleHazardPointerManager<T> {
-  fn acquire(&self, idx: usize, pointer: *mut T) {
+impl HazardPointerManager for SimpleHazardPointerManager {
+  fn acquire(&self, idx: usize, pointer: usize) {
     let thread_context = ThreadContext::current();
     self.acquired_pointers[thread_context.thread_id][idx].store(pointer, Ordering::Release);
   }
 
   fn release(&self, idx: usize) {
     let thread_context = ThreadContext::current();
-    self.acquired_pointers[thread_context.thread_id][idx].store(ptr::null_mut(), Ordering::Release);
+    self.acquired_pointers[thread_context.thread_id][idx].store(0usize, Ordering::Release);
   }
 
-  fn retire(&self, ptr: *mut T) {
+  fn retire(&self, ptr: RetiredPointer) {
     self.with_retired_pointers(|retired_pointers| {
-      retired_pointers.push_back(ptr as usize);
+      retired_pointers.push(ptr);
 
       if retired_pointers.len() > self.config.scan_threshold {
         self.scan(retired_pointers);
@@ -121,8 +107,8 @@ impl<T> HazardPointerManager<T> for SimpleHazardPointerManager<T> {
 
 }
 
-unsafe impl<T> Sync for SimpleHazardPointerManager<T> {}
-unsafe impl<T> Send for SimpleHazardPointerManager<T> {}
+unsafe impl Sync for SimpleHazardPointerManager {}
+unsafe impl Send for SimpleHazardPointerManager {}
 
 
 
@@ -136,18 +122,19 @@ mod tests {
   use std::mem::transmute;
 
   use ::collection::hazard_pointer_manager::HazardPointerManager;
+  use ::collection::hazard_pointer_manager::is_null;
   use ::thread::thread_context::ThreadContext;
   use super::SimpleHazardPointerManager;
   use super::Config;
 
   #[test]
   fn test_init() {
-    let manager: SimpleHazardPointerManager<u32> = SimpleHazardPointerManager::new(Config { 
+    let manager: SimpleHazardPointerManager = SimpleHazardPointerManager::new(Config { 
       thread_num: 10, 
       pointer_num: 4,
       scan_threshold: 5,
       id: 1
-    }, None);
+    });
     assert_eq!(11, manager.acquired_pointers.len());
     assert_eq!(4, manager.acquired_pointers[0].len());
     manager.with_retired_pointers(|retired_pointers| {
@@ -157,23 +144,23 @@ mod tests {
 
   #[test]
   fn test_acquire_release() {
-    let manager: SimpleHazardPointerManager<u32> = SimpleHazardPointerManager::new(Config { 
+    let manager: SimpleHazardPointerManager = SimpleHazardPointerManager::new(Config { 
       thread_num: 10, 
       pointer_num: 4,
       scan_threshold: 5,
       id: 1
-    }, None);
+    });
 
     let thread_id = 3;
     ThreadContext::set_current(ThreadContext::new(thread_id));
 
-    let ptr = &mut 12u32 as *mut u32;
+    let ptr = &mut 12u32 as *mut u32 as usize;
     manager.acquire(1, ptr);
 
     assert_eq!(ptr, manager.acquired_pointers[thread_id][1].load(Ordering::Relaxed));
 
     manager.release(1);
-    assert_eq!(ptr::null_mut(), manager.acquired_pointers[thread_id][1].load(Ordering::Relaxed));
+    assert!(is_null(manager.acquired_pointers[thread_id][1].load(Ordering::Relaxed)));
   }
 
   mod retire_test {
@@ -186,25 +173,27 @@ mod tests {
     use std::mem::transmute;
 
     use ::collection::hazard_pointer_manager::HazardPointerManager;
+    use ::collection::hazard_pointer_manager::RetiredPointer;
     use ::thread::thread_context::ThreadContext;
     use super::SimpleHazardPointerManager;
     use super::Config;
 
     static flags: [AtomicBool;3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
 
-    fn free_and_set(p: *mut usize) {
+    fn free_and_set(p: usize) {
+      let p = unsafe { transmute::<usize, *mut usize>(p) };
       let v = unsafe { *p };
       flags[v-1].store(true, Ordering::Relaxed);
     }
 
     #[test]
     fn test_retire() {
-      let manager: Arc<SimpleHazardPointerManager<usize>> = Arc::new(SimpleHazardPointerManager::new(Config { 
+      let manager: Arc<SimpleHazardPointerManager> = Arc::new(SimpleHazardPointerManager::new(Config { 
         thread_num: 2, 
         pointer_num: 2,
         scan_threshold: 1,
         id: 1
-      }, Some(Box::new(free_and_set))));
+      }));
 
       let data1 = Box::into_raw(Box::new(1usize)) as usize;
       let data2 = Box::into_raw(Box::new(2usize)) as usize;
@@ -222,7 +211,7 @@ mod tests {
         thread::spawn(move || {
           ThreadContext::set_current(ThreadContext::new(1));
           let p1 = unsafe { transmute::<usize, *mut usize>(data1) };
-          manager_clone.acquire(0, p1);
+          manager_clone.acquire_ptr(0, p1);
           barrier1_clone.wait();
           barrier2_clone.wait();
           manager_clone.release(0);
@@ -237,9 +226,9 @@ mod tests {
         let manager_clone = manager.clone();
         thread::spawn(move || {
           ThreadContext::set_current(ThreadContext::new(2));
-          let p1 = unsafe { transmute::<usize, *mut usize>(data1) };
-          let p2 = unsafe { transmute::<usize, *mut usize>(data2) };
-          let p3 = unsafe { transmute::<usize, *mut usize>(data3) };
+          let p1 = RetiredPointer{ ptr: data1, deleter: Box::new(free_and_set) };
+          let p2 = RetiredPointer{ ptr: data2, deleter: Box::new(free_and_set) };
+          let p3 = RetiredPointer{ ptr: data3, deleter: Box::new(free_and_set) };
           barrier1_clone.wait();
           manager_clone.retire(p1);
           manager_clone.retire(p2);
