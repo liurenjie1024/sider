@@ -86,12 +86,16 @@ impl SimpleHazardPointerManager {
 
         retired_pointer.retain(|p| acquired_pointers.contains(&p.ptr));
     }
-}
 
-impl HazardPointerManager for SimpleHazardPointerManager {
     fn acquire(&self, idx: usize, pointer: usize) {
         let thread_context = ThreadContext::current();
         self.acquired_pointers[thread_context.thread_id][idx].store(pointer, Ordering::Release);
+    }
+}
+
+impl HazardPointerManager for SimpleHazardPointerManager {
+    fn acquire_ptr<T>(&self, idx: usize, ptr: *mut T) {
+        self.acquire(idx, ptr as usize);
     }
 
     fn release(&self, idx: usize) {

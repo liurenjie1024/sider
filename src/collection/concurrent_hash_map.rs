@@ -99,8 +99,6 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
             .map(|_| Bucket::new())
             .collect::<Vec<Bucket<K, V>>>()
             .into_boxed_slice());
-        let head = Box::into_raw(Node::make_sentinel_node(0usize));
-        buckets[0].head.store(head, Ordering::Relaxed);
 
         ConcurrentHashMap {
             memory_manager: m,
@@ -256,17 +254,8 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
         let bucket = self.bucket_of(hash_code);
         let bucket_pos = self.get_bucket_pos(hash_code);
         if bucket.head.load(Ordering::Relaxed).is_null() {
-            let parent = self.get_parent(bucket_pos);
-            self.insert_sentinel_node(parent as u64);
             let node = Node::make_sentinel_node(bucket_pos);
-            let (pre, found) = self.find_from_node(&node.key,
-                                                   node.split_order_key,
-                                                   &self.get_sentinel_node(parent).unwrap().next);
-            assert!(!found, "sentinel node of {} should not exists.", bucket_pos);
-            let next = pre.load(Ordering::Relaxed);
-            node.next.store(next, Ordering::Relaxed);
             let raw_node = Box::into_raw(node);
-            pre.store(raw_node, Ordering::Release);
             bucket.head.store(raw_node, Ordering::Release);
         }
     }
@@ -295,26 +284,16 @@ impl<K, V, M> ConcurrentHashMap<K, V, M>
         (self.get_bucket_size() - 1) & (hash_code as usize)
     }
 
-    fn get_parent(&self, bucket_pos: usize) -> usize {
-        if bucket_pos == 0 {
-            0
-        } else {
-            bucket_pos - (reserve_only_msb(bucket_pos as u64) as usize)
-        }
-    }
-
     // This method is only used in the single writer thread.
     fn find(&self,
             key: &K,
             hash_code: HashUnit,
             split_order_key: HashUnit)
             -> (&AtomicPtr<Node<K, V>>, bool) {
-        unsafe {
-            self.insert_sentinel_node(hash_code);
-            self.find_from_node(key,
-                                split_order_key,
-                                &self.get_sentinel_node(hash_code as usize).unwrap().next)
-        }
+        self.insert_sentinel_node(hash_code);
+        self.find_from_node(key,
+                            split_order_key,
+                            &self.get_sentinel_node(hash_code as usize).unwrap().next)
     }
 
     fn find_from_node<'a, 'b>(&'a self,
@@ -616,7 +595,7 @@ mod tests {
         let map = Arc::new(make_map(1024*1024));
         assert_eq!(1024*1024, map.get_bucket_size());
 
-        let key_size = 5000000;
+        let key_size = 500000;
         let mut keys = Vec::with_capacity(key_size);
         for i in 0..key_size {
             keys.push(make_key(&i.to_string()));
@@ -674,15 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_parent() {
-        let map = make_map(1024*16);
-
-        assert_eq!(0, map.get_parent(0));
-        assert_eq!(0, map.get_parent(1));
-        assert_eq!(4, map.get_parent(12));
-    }
-
-    #[test]
     fn test_insert_sentinel_node() {
         let map_size = 1024*16;
         let map = make_map(map_size);
@@ -694,13 +664,6 @@ mod tests {
 
         for i in 0..map_size {
             assert!(map.get_sentinel_node(i).is_some());
-        }
-
-        let node = map.get_sentinel_node(0).unwrap();
-        let split_order_key = node.split_order_key;
-        for _ in 1..map_size {
-            let cur_node = unsafe { &*node.next.load(Ordering::Relaxed) };
-            assert!(cur_node.split_order_key > node.split_order_key);
         }
     }
 

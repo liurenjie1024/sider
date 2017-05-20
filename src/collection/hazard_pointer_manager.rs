@@ -15,13 +15,9 @@ impl Drop for RetiredPointer {
 }
 
 pub trait HazardPointerManager {
-    fn acquire(&self, idx: usize, pointer: usize);
+    fn acquire_ptr<T>(&self, idx: usize, pointer: *mut T);
     fn release(&self, idx: usize);
     fn retire(&self, pointer: RetiredPointer);
-
-    fn acquire_ptr<T>(&self, idx: usize, pointer: *mut T) {
-        self.acquire(idx, pointer as usize);
-    }
 
     fn retire_ptr<T>(&self, pointer: *mut T) {
         let deleter = |ptr| {
