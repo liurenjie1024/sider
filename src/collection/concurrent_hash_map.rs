@@ -400,6 +400,9 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::collections::HashSet;
 
+    use rand::Rng;
+    use rand::thread_rng;
+
     use super::ConcurrentHashMap;
     use super::Node;
     use collection::simple_hazard_pointer::SimpleHazardPointerManager;
@@ -584,6 +587,72 @@ mod tests {
 
         for i in 0..key_size {
             assert!(!map.contains(&keys[i]));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_concurrency() {
+        const SIZE: usize = 1024;
+        const KEY_SIZE: usize = 2000;
+        ThreadContext::set_current(ThreadContext::new(1));
+
+
+        let map = Arc::new(make_map(SIZE));
+
+        let key_size = KEY_SIZE;
+        let mut keys = Vec::with_capacity(key_size);
+        for i in 0..key_size {
+            keys.push(make_key(&i.to_string()));
+            map.put(make_key(&i.to_string()), i as u32);
+        }
+        assert_eq!(key_size, map.get_size());
+
+        let stop = Arc::new(AtomicBool::new(false));
+
+        //open 5 threads to query map concurrently
+        let others = (0..5).map(|i| {
+            let this_map = map.clone();
+            let this_stop = stop.clone();
+            let len = keys.len();
+            thread::spawn(move || {
+                ThreadContext::set_current(ThreadContext::new(i + 2));
+                println!("thread {} started.", i + 2);
+
+                let mut idx = 1usize;
+                while !this_stop.load(Ordering::SeqCst) {
+                    this_map.search(&make_key(&idx.to_string()), |v| match v {
+                        Some(&x) => assert_eq!(idx as u32, x),
+                        None => (),
+                    });
+                    let v = this_map.contains(&make_key(&idx.to_string()));
+                    if v {
+                        idx += (idx+2)%len;
+                    } else {
+                        idx += (idx+1)%len;
+                    }
+                    thread::sleep_ms(5);
+                }
+                println!("thread {} stopped.", i + 2);
+            })
+        })
+        .collect::<Vec<_>>();
+
+        let mut rnd = thread_rng();
+        for _ in 0..10000 {
+            let idx = rnd.gen::<usize>()%KEY_SIZE;
+            if idx % 2 == 0 {
+                map.delete(&keys[idx]);
+            } else {
+                map.put(make_key(&idx.to_string()), idx as u32);
+            }
+            thread::sleep_ms(1);
+        }
+
+        stop.store(true, Ordering::SeqCst);
+
+        for t in others {
+            assert!(t.join().is_ok());
         }
     }
 

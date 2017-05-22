@@ -6,3 +6,4 @@ mod collection;
 mod thread;
 
 extern crate test;
+extern crate rand;
